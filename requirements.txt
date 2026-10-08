@@ -1,5 +1,3 @@
-# QuantConnect LEAN Engine core package
-lean
-
-# QuantConnect Python API bindings & indicators
-QuantConnect.Algorithm
+streamlit
+pandas
+plotly
