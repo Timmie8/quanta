@@ -1,5 +1,5 @@
+import numpy as np
 import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
@@ -19,24 +19,42 @@ tickers_input = st.text_input(
 )
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
-selected_ticker = st.selectbox("Selecteer een aandeel om de grafiek te bekijken:", tickers)
+selected_ticker = st.selectbox(
+    "Selecteer een aandeel om de grafiek te bekijken:", tickers
+)
 
 if selected_ticker:
     with st.spinner(f"Data ophalen voor {selected_ticker}..."):
-        # Koersdata van de afgelopen 2 jaar ophalen
         df = yf.download(selected_ticker, period="2y", interval="1d")
 
     if not df.empty:
-        # MultiIndex kolommen opschonen indien aanwezig
+        # MultiIndex kolommen opschonen
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 2. Indicatoren berekenen (conform QuantConnect logica)
-        df["EMA_20"] = ta.ema(df["Close"], length=20)
-        df["EMA_50"] = ta.ema(df["Close"], length=50)
-        df["RSI_14"] = ta.rsi(df["Close"], length=14)
-        df["ATR_14"] = ta.atr(df["High"], df["Low"], df["Close"], length=14)
-        df["ROC_5"] = ta.roc(df["Close"], length=5)
+        # 2. Indicatoren berekenen met pure Pandas (geen pandas-ta nodig)
+        # EMA 20 & 50
+        df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
+        df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
+        # ROC 5
+        df["ROC_5"] = df["Close"].pct_change(5) * 100
+
+        # RSI 14
+        delta = df["Close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df["RSI_14"] = 100 - (100 / (1 + rs))
+
+        # ATR 14
+        high_low = df["High"] - df["Low"]
+        high_close = np.abs(df["High"] - df["Close"].shift())
+        low_close = np.abs(df["Low"] - df["Close"].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df["ATR_14"] = tr.rolling(14).mean()
+
+        # Resistance & Support 20D
         df["Resistance_20"] = df["High"].rolling(20).max()
         df["Support_20"] = df["Low"].rolling(20).min()
 
@@ -67,7 +85,7 @@ if selected_ticker:
         elif latest["Close"] < prev_support:
             score -= 1
 
-        # Verdict bepalen
+        # Verdict
         verdict = "HOLD"
         if score >= 2 and latest["RSI_14"] > 50:
             verdict = "BUY"
@@ -84,7 +102,6 @@ if selected_ticker:
 
         st.divider()
 
-        # Target & Stop-loss berekening bij een BUY signaal
         if verdict == "BUY":
             entry = latest["Close"]
             atr = latest["ATR_14"]
@@ -96,8 +113,6 @@ if selected_ticker:
 
         # 4. Interactive Plotly Grafiek
         fig = go.Figure()
-
-        # Candlesticks
         fig.add_trace(
             go.Candlestick(
                 x=df.index,
@@ -108,8 +123,6 @@ if selected_ticker:
                 name="Koers",
             )
         )
-
-        # Moving Averages & Resistance/Support
         fig.add_trace(
             go.Scatter(
                 x=df.index,
@@ -152,8 +165,5 @@ if selected_ticker:
         )
 
         st.plotly_chart(fig, use_container_width=True)
-
     else:
-        st.error(
-            f"Geen gegevens gevonden voor {selected_ticker}. Controleer of de ticker correct is."
-        )
+        st.error(f"Geen gegevens gevonden voor {selected_ticker}.")
