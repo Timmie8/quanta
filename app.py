@@ -5,12 +5,12 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(
-    page_title="Trading Strategy & Signal Dashboard", layout="wide"
+    page_title="Multi-Timeframe Trading Dashboard", layout="wide"
 )
 
-st.title("📈 Trading Strategy & Signal Dashboard")
+st.title("📈 Multi-Timeframe Trading & Signal Dashboard")
 st.write(
-    "Analyseer aandelen voor zowel **Swing Trading** als **Daytrading**."
+    "Bekijk de trend en signalen over meerdere timeframes: **Swing (Daily)**, **1 Uur**, **15 Minuten** en **5 Minuten**."
 )
 
 # 1. Invoer van aandelen
@@ -23,166 +23,358 @@ selected_ticker = st.selectbox(
     "Selecteer een aandeel om te analyseren:", tickers
 )
 
-if selected_ticker:
-    with st.spinner(f"Data ophalen voor {selected_ticker}..."):
-        # 1-minuut data voor Daytrading (laatste 7 dagen) & Dagelijkse data voor Swing
-        df_daily = yf.download(selected_ticker, period="1y", interval="1d")
-        df_intraday = yf.download(selected_ticker, period="5d", interval="5m")
 
-    if not df_daily.empty:
-        # MultiIndex kolommen opschonen
-        if isinstance(df_daily.columns, pd.MultiIndex):
-            df_daily.columns = df_daily.columns.get_level_values(0)
-        if isinstance(df_intraday.columns, pd.MultiIndex):
-            df_intraday.columns = df_intraday.columns.get_level_values(0)
+# Hulpfunctie voor het berekenen van indicatoren en scores per timeframe
+def analyze_timeframe(df, tf_type="intraday"):
+    if df.empty:
+        return None, 0, "GEEN DATA", {}
 
-        # Tabs aanmaken voor Swing en Daytrade
-        tab1, tab2 = st.tabs(["🌊 Swing Trading (3-5 dagen)", "⚡ Daytrading (Intraday)"])
+    # MultiIndex opschonen
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
-        # ==========================================
-        # TAB 1: SWING TRADING LOGICA
-        # ==========================================
-        with tab1:
-            st.subheader(f"Swing Trade Analyse - {selected_ticker}")
+    df = df.copy()
 
-            # Indicatoren Swing (20/50 EMA, 20D Resistance/Support)
-            df_daily["EMA_20"] = df_daily["Close"].ewm(span=20, adjust=False).mean()
-            df_daily["EMA_50"] = df_daily["Close"].ewm(span=50, adjust=False).mean()
-            df_daily["ROC_5"] = df_daily["Close"].pct_change(5) * 100
+    # MAs en RSI
+    if tf_type == "swing":
+        df["EMA_FAST"] = df["Close"].ewm(span=20, adjust=False).mean()
+        df["EMA_SLOW"] = df["Close"].ewm(span=50, adjust=False).mean()
+        df["ROC"] = df["Close"].pct_change(5) * 100
+    else:  # Intraday / Kortere timeframes
+        df["EMA_FAST"] = df["Close"].ewm(span=5, adjust=False).mean()
+        df["EMA_SLOW"] = df["Close"].ewm(span=15, adjust=False).mean()
+        df["ROC"] = df["Close"].pct_change(3) * 100
 
-            delta = df_daily["Close"].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df_daily["RSI_14"] = 100 - (100 / (1 + rs))
+        # VWAP berekenen voor intraday
+        v = df["Volume"]
+        tp = (df["High"] + df["Low"] + df["Close"]) / 3
+        df["VWAP"] = (tp * v).cumsum() / (v.cumsum() + 1e-9)
 
-            high_low = df_daily["High"] - df_daily["Low"]
-            high_close = np.abs(df_daily["High"] - df_daily["Close"].shift())
-            low_close = np.abs(df_daily["Low"] - df_daily["Close"].shift())
-            tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-            df_daily["ATR_14"] = tr.rolling(14).mean()
+    # RSI 14
+    delta = df["Close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-9)
+    df["RSI_14"] = 100 - (100 / (1 + rs))
 
-            df_daily["Resistance_20"] = df_daily["High"].rolling(20).max()
-            df_daily["Support_20"] = df_daily["Low"].rolling(20).min()
+    # Resistance & Support (20 periodes)
+    df["Resistance"] = df["High"].rolling(20).max()
+    df["Support"] = df["Low"].rolling(20).min()
 
-            latest_s = df_daily.iloc[-1]
-            prev_res_s = df_daily["Resistance_20"].shift(1).iloc[-1]
-            prev_sup_s = df_daily["Support_20"].shift(1).iloc[-1]
+    latest = df.iloc[-1]
+    prev_res = df["Resistance"].shift(1).iloc[-1]
+    prev_sup = df["Support"].shift(1).iloc[-1]
 
-            # Swing Score (-4 tot +4)
-            score_s = 0
-            if latest_s["EMA_20"] > latest_s["EMA_50"]: score_s += 1
-            elif latest_s["EMA_20"] < latest_s["EMA_50"]: score_s -= 1
+    # Score berekening (-4 tot +4)
+    score = 0
+    if latest["EMA_FAST"] > latest["EMA_SLOW"]:
+        score += 1
+    elif latest["EMA_FAST"] < latest["EMA_SLOW"]:
+        score -= 1
 
-            if latest_s["ROC_5"] > 0: score_s += 1
-            elif latest_s["ROC_5"] < 0: score_s -= 1
-
-            if latest_s["RSI_14"] > 50: score_s += 1
-            elif latest_s["RSI_14"] < 50: score_s -= 1
-
-            if latest_s["Close"] > prev_res_s: score_s += 1
-            elif latest_s["Close"] < prev_sup_s: score_s -= 1
-
-            verdict_s = "HOLD"
-            if score_s >= 2 and latest_s["RSI_14"] > 50: verdict_s = "BUY"
-            elif score_s <= -2 and latest_s["RSI_14"] < 50: verdict_s = "SELL"
-
-            # Metrics
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Swing Signaal", verdict_s)
-            c2.metric("Score", f"{score_s} / 4")
-            c3.metric("RSI (14)", f"{latest_s['RSI_14']:.1f}")
-            c4.metric("ATR (14)", f"${latest_s['ATR_14']:.2f}")
-            c5.metric("Koers", f"${latest_s['Close']:.2f}")
-
-            if verdict_s == "BUY":
-                entry = latest_s["Close"]
-                atr = latest_s["ATR_14"]
-                st.info(f"🎯 **Swing Trading Levels (BUY):** Entry: **${entry:.2f}** | Stop Loss (1.5x ATR): **${entry - 1.5*atr:.2f}** | Take Profit (3x ATR): **${entry + 3.0*atr:.2f}**")
-
-            # Grafiek Swing
-            fig_s = go.Figure()
-            fig_s.add_trace(go.Candlestick(x=df_daily.index, open=df_daily["Open"], high=df_daily["High"], low=df_daily["Low"], close=df_daily["Close"], name="Koers"))
-            fig_s.add_trace(go.Scatter(x=df_daily.index, y=df_daily["EMA_20"], line=dict(color="blue", width=1.5), name="EMA 20"))
-            fig_s.add_trace(go.Scatter(x=df_daily.index, y=df_daily["EMA_50"], line=dict(color="orange", width=1.5), name="EMA 50"))
-            fig_s.add_trace(go.Scatter(x=df_daily.index, y=df_daily["Resistance_20"], line=dict(color="green", width=1, dash="dash"), name="Resistance (20D)"))
-            fig_s.add_trace(go.Scatter(x=df_daily.index, y=df_daily["Support_20"], line=dict(color="red", width=1, dash="dash"), name="Support (20D)"))
-            fig_s.update_layout(title="Swing Chart (Daily)", xaxis_title="Datum", yaxis_title="Prijs ($)", xaxis_rangeslider_visible=False, height=500)
-            st.plotly_chart(fig_s, use_container_width=True)
-
-        # ==========================================
-        # TAB 2: DAYTRADING LOGICA (INTRADAY)
-        # ==========================================
-        with tab2:
-            st.subheader(f"Daytrading Analyse (5-minuten Intraday) - {selected_ticker}")
-
-            if not df_intraday.empty:
-                # Indicatoren Daytrading (EMA 5/15, Intraday VWAP, 14-period RSI op 5m)
-                df_intraday["EMA_5"] = df_intraday["Close"].ewm(span=5, adjust=False).mean()
-                df_intraday["EMA_15"] = df_intraday["Close"].ewm(span=15, adjust=False).mean()
-
-                # VWAP berekening
-                v = df_intraday["Volume"]
-                tp = (df_intraday["High"] + df_intraday["Low"] + df_intraday["Close"]) / 3
-                df_intraday["VWAP"] = (tp * v).cumsum() / v.cumsum()
-
-                # Momentum (ROC 3 op 5m)
-                df_intraday["ROC_3"] = df_intraday["Close"].pct_change(3) * 100
-
-                # RSI 14 op intraday
-                delta_d = df_intraday["Close"].diff()
-                gain_d = (delta_d.where(delta_d > 0, 0)).rolling(window=14).mean()
-                loss_d = (-delta_d.where(delta_d < 0, 0)).rolling(window=14).mean()
-                rs_d = gain_d / loss_d
-                df_intraday["RSI_14"] = 100 - (100 / (1 + rs_d))
-
-                latest_d = df_intraday.iloc[-1]
-
-                # Daytrade Score (-4 tot +4)
-                score_d = 0
-                # 1. Trend: EMA 5 vs EMA 15
-                if latest_d["EMA_5"] > latest_d["EMA_15"]: score_d += 1
-                elif latest_d["EMA_5"] < latest_d["EMA_15"]: score_d -= 1
-
-                # 2. VWAP Positie (cruciaal voor daytraders)
-                if latest_d["Close"] > latest_d["VWAP"]: score_d += 1
-                elif latest_d["Close"] < latest_d["VWAP"]: score_d -= 1
-
-                # 3. Korte Termijn Momentum
-                if latest_d["ROC_3"] > 0: score_d += 1
-                elif latest_d["ROC_3"] < 0: score_d -= 1
-
-                # 4. Intraday RSI Filter
-                if latest_d["RSI_14"] > 50: score_d += 1
-                elif latest_d["RSI_14"] < 50: score_d -= 1
-
-                verdict_d = "HOLD / NEUTRAAL"
-                if score_d >= 3 and latest_d["Close"] > latest_d["VWAP"]: verdict_d = "STRONG BUY (SCALP)"
-                elif score_d == 2: verdict_d = "BUY (INTRADAY)"
-                elif score_d <= -3 and latest_d["Close"] < latest_d["VWAP"]: verdict_d = "STRONG SHORT"
-                elif score_d <= -2: verdict_d = "SHORT (INTRADAY)"
-
-                # Metrics Daytrading
-                dc1, dc2, dc3, dc4, dc5 = st.columns(5)
-                dc1.metric("Daytrade Signaal", verdict_d)
-                dc2.metric("Daytrade Score", f"{score_d} / 4")
-                dc3.metric("RSI (5m)", f"{latest_d['RSI_14']:.1f}")
-                dc4.metric("VWAP", f"${latest_d['VWAP']:.2f}")
-                dc5.metric("Laatste Koers", f"${latest_d['Close']:.2f}")
-
-                st.divider()
-
-                # Grafiek Daytrading (5-minuten kaarten van de laatste trading sessie)
-                df_today = df_intraday.tail(78)  # Laatste 6,5 uur aan 5-minuten bars
-                fig_d = go.Figure()
-                fig_d.add_trace(go.Candlestick(x=df_today.index, open=df_today["Open"], high=df_today["High"], low=df_today["Low"], close=df_today["Close"], name="5m Koers"))
-                fig_d.add_trace(go.Scatter(x=df_today.index, y=df_today["EMA_5"], line=dict(color="cyan", width=1.5), name="EMA 5"))
-                fig_d.add_trace(go.Scatter(x=df_today.index, y=df_today["EMA_15"], line=dict(color="purple", width=1.5), name="EMA 15"))
-                fig_d.add_trace(go.Scatter(x=df_today.index, y=df_today["VWAP"], line=dict(color="magenta", width=2), name="VWAP"))
-                fig_d.update_layout(title="Daytrade Chart (5-Minuten Intraday)", xaxis_title="Tijd", yaxis_title="Prijs ($)", xaxis_rangeslider_visible=False, height=500)
-                st.plotly_chart(fig_d, use_container_width=True)
-            else:
-                st.error("Geen intraday data beschikbaar (markt gesloten of geen data).")
-
+    if tf_type == "intraday" and "VWAP" in latest:
+        if latest["Close"] > latest["VWAP"]:
+            score += 1
+        elif latest["Close"] < latest["VWAP"]:
+            score -= 1
     else:
-        st.error(f"Geen gegevens gevonden voor {selected_ticker}.")
+        if latest["ROC"] > 0:
+            score += 1
+        elif latest["ROC"] < 0:
+            score -= 1
+
+    if latest["RSI_14"] > 50:
+        score += 1
+    elif latest["RSI_14"] < 50:
+        score -= 1
+
+    if latest["Close"] > prev_res:
+        score += 1
+    elif latest["Close"] < prev_sup:
+        score -= 1
+
+    # Verdict bepalen
+    if score >= 3:
+        verdict = "STRONG BUY"
+    elif score >= 1:
+        verdict = "BUY"
+    elif score <= -3:
+        verdict = "STRONG SELL"
+    elif score <= -1:
+        verdict = "SELL"
+    else:
+        verdict = "NEUTRAAL"
+
+    metrics = {
+        "score": score,
+        "verdict": verdict,
+        "price": latest["Close"],
+        "rsi": latest["RSI_14"],
+        "ema_fast": latest["EMA_FAST"],
+        "ema_slow": latest["EMA_SLOW"],
+        "vwap": latest.get("VWAP", None),
+    }
+
+    return df, score, verdict, metrics
+
+
+if selected_ticker:
+    with st.spinner(f"Alle timeframes ophalen voor {selected_ticker}..."):
+        # Data ophalen voor diverse timeframes
+        df_daily = yf.download(selected_ticker, period="1y", interval="1d")
+        df_1h = yf.download(selected_ticker, period="1mo", interval="1h")
+        df_15m = yf.download(selected_ticker, period="1mo", interval="15m")
+        df_5m = yf.download(selected_ticker, period="5d", interval="5m")
+
+    # Timeframe analyses uitvoeren
+    df_daily, score_daily, verdict_daily, m_daily = analyze_timeframe(
+        df_daily, tf_type="swing"
+    )
+    df_1h, score_1h, verdict_1h, m_1h = analyze_timeframe(
+        df_1h, tf_type="intraday"
+    )
+    df_15m, score_15m, verdict_15m, m_15m = analyze_timeframe(
+        df_15m, tf_type="intraday"
+    )
+    df_5m, score_5m, verdict_5m, m_5m = analyze_timeframe(
+        df_5m, tf_type="intraday"
+    )
+
+    # =========================================================
+    # BOVENKANT: MULTI-TIMEFRAME SCORE MATRIX & OVERZICHT
+    # =========================================================
+    st.subheader(f"📊 Multi-Timeframe Signaal Matrix - {selected_ticker}")
+
+    t_col1, t_col2, t_col3, t_col4 = st.columns(4)
+
+    t_col1.metric(
+        label="🌊 Swing (Daily)",
+        value=verdict_daily,
+        delta=f"Score: {score_daily} / 4",
+    )
+    t_col2.metric(
+        label="⏱️ 1 Uur (Trend)",
+        value=verdict_1h,
+        delta=f"Score: {score_1h} / 4",
+    )
+    t_col3.metric(
+        label="⚡ 15 Minuten (Setup)",
+        value=verdict_15m,
+        delta=f"Score: {score_15m} / 4",
+    )
+    t_col4.metric(
+        label="🎯 5 Minuten (Entry)",
+        value=verdict_5m,
+        delta=f"Score: {score_5m} / 4",
+    )
+
+    # Totale Confluentie Check
+    total_score = score_daily + score_1h + score_15m + score_5m
+    st.write(f"**Totale Confluentie Score:** `{total_score} / 16`")
+
+    if total_score >= 10:
+        st.success(
+            "🔥 **Sterke Bullish Confluentie:** Alle timeframes wijzen in dezelfde opwaartse richting!"
+        )
+    elif total_score <= -10:
+        st.error(
+            "⚠️ **Sterke Bearish Confluentie:** Alle timeframes wijzen in dezelfde neerwaartse richting!"
+        )
+    else:
+        st.info(
+            "ℹ️ **Gemengde Trend:** De timeframes spreken elkaar deels tegen. Wees voorzichtig met instappen."
+        )
+
+    st.divider()
+
+    # =========================================================
+    # TABS VOOR ELKE DETAILED TIMEFRAME GRAFIEK
+    # =========================================================
+    tab_s, tab_1h, tab_15m, tab_5m = st.tabs(
+        [
+            "🌊 Swing (Daily)",
+            "⏱️ 1 Uur Trend",
+            "⚡ 15 Minuten Setup",
+            "🎯 5 Minuten Entry",
+        ]
+    )
+
+    # 1. SWING TAB
+    with tab_s:
+        st.write(
+            f"**Swing Score:** `{score_daily}/4` | **RSI:** `{m_daily['rsi']:.1f}`"
+        )
+        fig_s = go.Figure()
+        fig_s.add_trace(
+            go.Candlestick(
+                x=df_daily.index,
+                open=df_daily["Open"],
+                high=df_daily["High"],
+                low=df_daily["Low"],
+                close=df_daily["Close"],
+                name="Koers",
+            )
+        )
+        fig_s.add_trace(
+            go.Scatter(
+                x=df_daily.index,
+                y=df_daily["EMA_FAST"],
+                line=dict(color="blue", width=1.5),
+                name="EMA 20",
+            )
+        )
+        fig_s.add_trace(
+            go.Scatter(
+                x=df_daily.index,
+                y=df_daily["EMA_SLOW"],
+                line=dict(color="orange", width=1.5),
+                name="EMA 50",
+            )
+        )
+        fig_s.update_layout(
+            title="Daily Swing Chart",
+            xaxis_rangeslider_visible=False,
+            height=450,
+        )
+        st.plotly_chart(fig_s, use_container_width=True)
+
+    # 2. 1 UUR TAB
+    with tab_1h:
+        st.write(
+            f"**1H Score:** `{score_1h}/4` | **RSI:** `{m_1h['rsi']:.1f}` | **VWAP:** `${m_1h['vwap']:.2f}`"
+        )
+        fig_1h = go.Figure()
+        fig_1h.add_trace(
+            go.Candlestick(
+                x=df_1h.index,
+                open=df_1h["Open"],
+                high=df_1h["High"],
+                low=df_1h["Low"],
+                close=df_1h["Close"],
+                name="Koers",
+            )
+        )
+        fig_1h.add_trace(
+            go.Scatter(
+                x=df_1h.index,
+                y=df_1h["EMA_FAST"],
+                line=dict(color="cyan", width=1.5),
+                name="EMA 5",
+            )
+        )
+        fig_1h.add_trace(
+            go.Scatter(
+                x=df_1h.index,
+                y=df_1h["EMA_SLOW"],
+                line=dict(color="purple", width=1.5),
+                name="EMA 15",
+            )
+        )
+        fig_1h.add_trace(
+            go.Scatter(
+                x=df_1h.index,
+                y=df_1h["VWAP"],
+                line=dict(color="magenta", width=2),
+                name="VWAP",
+            )
+        )
+        fig_1h.update_layout(
+            title="1 Uur Trend Chart",
+            xaxis_rangeslider_visible=False,
+            height=450,
+        )
+        st.plotly_chart(fig_1h, use_container_width=True)
+
+    # 3. 15 MINUTEN TAB
+    with tab_15m:
+        st.write(
+            f"**15M Score:** `{score_15m}/4` | **RSI:** `{m_15m['rsi']:.1f}` | **VWAP:** `${m_15m['vwap']:.2f}`"
+        )
+        fig_15m = go.Figure()
+        fig_15m.add_trace(
+            go.Candlestick(
+                x=df_15m.index,
+                open=df_15m["Open"],
+                high=df_15m["High"],
+                low=df_15m["Low"],
+                close=df_15m["Close"],
+                name="Koers",
+            )
+        )
+        fig_15m.add_trace(
+            go.Scatter(
+                x=df_15m.index,
+                y=df_15m["EMA_FAST"],
+                line=dict(color="cyan", width=1.5),
+                name="EMA 5",
+            )
+        )
+        fig_15m.add_trace(
+            go.Scatter(
+                x=df_15m.index,
+                y=df_15m["EMA_SLOW"],
+                line=dict(color="purple", width=1.5),
+                name="EMA 15",
+            )
+        )
+        fig_15m.add_trace(
+            go.Scatter(
+                x=df_15m.index,
+                y=df_15m["VWAP"],
+                line=dict(color="magenta", width=2),
+                name="VWAP",
+            )
+        )
+        fig_15m.update_layout(
+            title="15 Minuten Setup Chart",
+            xaxis_rangeslider_visible=False,
+            height=450,
+        )
+        st.plotly_chart(fig_15m, use_container_width=True)
+
+    # 4. 5 MINUTEN TAB
+    with tab_5m:
+        st.write(
+            f"**5M Score:** `{score_5m}/4` | **RSI:** `{m_5m['rsi']:.1f}` | **VWAP:** `${m_5m['vwap']:.2f}`"
+        )
+        fig_5m = go.Figure()
+        fig_5m.add_trace(
+            go.Candlestick(
+                x=df_5m.index,
+                open=df_5m["Open"],
+                high=df_5m["High"],
+                low=df_5m["Low"],
+                close=df_5m["Close"],
+                name="Koers",
+            )
+        )
+        fig_5m.add_trace(
+            go.Scatter(
+                x=df_5m.index,
+                y=df_5m["EMA_FAST"],
+                line=dict(color="cyan", width=1.5),
+                name="EMA 5",
+            )
+        )
+        fig_5m.add_trace(
+            go.Scatter(
+                x=df_5m.index,
+                y=df_5m["EMA_SLOW"],
+                line=dict(color="purple", width=1.5),
+                name="EMA 15",
+            )
+        )
+        fig_5m.add_trace(
+            go.Scatter(
+                x=df_5m.index,
+                y=df_5m["VWAP"],
+                line=dict(color="magenta", width=2),
+                name="VWAP",
+            )
+        )
+        fig_5m.update_layout(
+            title="5 Minuten Entry Chart",
+            xaxis_rangeslider_visible=False,
+            height=450,
+        )
+        st.plotly_chart(fig_5m, use_container_width=True)
