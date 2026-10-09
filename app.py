@@ -24,38 +24,67 @@ selected_ticker = st.selectbox(
 )
 
 
+# Hulpfunctie met Caching om data snel op te halen zonder te blijven hangen
+@st.cache_data(ttl=300)  # Data blijft 5 minuten gecachet
+def load_all_timeframe_data(ticker):
+    try:
+        df_daily = yf.download(
+            ticker, period="6mo", interval="1d", progress=False
+        )
+        df_1h = yf.download(ticker, period="7d", interval="1h", progress=False)
+        df_15m = yf.download(
+            ticker, period="5d", interval="15m", progress=False
+        )
+        df_5m = yf.download(ticker, period="1d", interval="5m", progress=False)
+        return df_daily, df_1h, df_15m, df_5m
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+
 # Hulpfunctie voor het bepalen van de kleur op basis van het verdict
 def get_signal_color(verdict):
     if "BUY" in verdict:
-        return "#00c853"  # Fel Groen
+        return "#00c853"  # Groen
     elif "SELL" in verdict:
-        return "#ff1744"  # Fel Rood
+        return "#ff1744"  # Rood
     else:
         return "#29b6f6"  # Blauw (HOLD / NEUTRAAL)
 
 
 # Hulpfunctie voor het berekenen van indicatoren en scores per timeframe
 def analyze_timeframe(df, tf_type="intraday"):
-    if df.empty:
-        return None, 0, "GEEN DATA", {}
+    if df.empty or len(df) < 5:
+        return (
+            df,
+            0,
+            "GEEN DATA",
+            {
+                "score": 0,
+                "verdict": "GEEN DATA",
+                "price": 0,
+                "rsi": 50,
+                "color": "#29b6f6",
+                "vwap": 0,
+            },
+        )
 
-    # MultiIndex opschonen
+    # MultiIndex opschonen indien aanwezig
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     df = df.copy()
 
-    # MAs en RSI
+    # Moving Averages en Momentum
     if tf_type == "swing":
         df["EMA_FAST"] = df["Close"].ewm(span=20, adjust=False).mean()
         df["EMA_SLOW"] = df["Close"].ewm(span=50, adjust=False).mean()
         df["ROC"] = df["Close"].pct_change(5) * 100
-    else:  # Intraday / Kortere timeframes
+    else:
         df["EMA_FAST"] = df["Close"].ewm(span=5, adjust=False).mean()
         df["EMA_SLOW"] = df["Close"].ewm(span=15, adjust=False).mean()
         df["ROC"] = df["Close"].pct_change(3) * 100
 
-        # VWAP berekenen voor intraday
+        # VWAP berekenen
         v = df["Volume"]
         tp = (df["High"] + df["Low"] + df["Close"]) / 3
         df["VWAP"] = (tp * v).cumsum() / (v.cumsum() + 1e-9)
@@ -68,8 +97,9 @@ def analyze_timeframe(df, tf_type="intraday"):
     df["RSI_14"] = 100 - (100 / (1 + rs))
 
     # Resistance & Support (20 periodes)
-    df["Resistance"] = df["High"].rolling(20).max()
-    df["Support"] = df["Low"].rolling(20).min()
+    lookback = min(len(df), 20)
+    df["Resistance"] = df["High"].rolling(lookback).max()
+    df["Support"] = df["Low"].rolling(lookback).min()
 
     latest = df.iloc[-1]
     prev_res = df["Resistance"].shift(1).iloc[-1]
@@ -119,10 +149,10 @@ def analyze_timeframe(df, tf_type="intraday"):
         "score": score,
         "verdict": verdict,
         "price": latest["Close"],
-        "rsi": latest["RSI_14"],
+        "rsi": latest["RSI_14"] if not pd.isna(latest["RSI_14"]) else 50,
         "ema_fast": latest["EMA_FAST"],
         "ema_slow": latest["EMA_SLOW"],
-        "vwap": latest.get("VWAP", None),
+        "vwap": latest.get("VWAP", 0),
         "color": get_signal_color(verdict),
     }
 
@@ -131,11 +161,9 @@ def analyze_timeframe(df, tf_type="intraday"):
 
 if selected_ticker:
     with st.spinner(f"Alle timeframes ophalen voor {selected_ticker}..."):
-        # Data ophalen voor diverse timeframes
-        df_daily = yf.download(selected_ticker, period="1y", interval="1d")
-        df_1h = yf.download(selected_ticker, period="1mo", interval="1h")
-        df_15m = yf.download(selected_ticker, period="1mo", interval="15m")
-        df_5m = yf.download(selected_ticker, period="5d", interval="5m")
+        df_daily, df_1h, df_15m, df_5m = load_all_timeframe_data(
+            selected_ticker
+        )
 
     # Timeframe analyses uitvoeren
     df_daily, score_daily, verdict_daily, m_daily = analyze_timeframe(
@@ -152,7 +180,7 @@ if selected_ticker:
     )
 
     # =========================================================
-    # BOVENKANT: MULTI-TIMEFRAME SCORE MATRIX & OVERZICHT
+    # MULTI-TIMEFRAME SCORE MATRIX OVERZICHT
     # =========================================================
     st.subheader(f"📊 Multi-Timeframe Signaal Matrix - {selected_ticker}")
 
@@ -207,7 +235,7 @@ if selected_ticker:
     st.divider()
 
     # =========================================================
-    # TABS VOOR ELKE DETAILED TIMEFRAME GRAFIEK
+    # TABS DETAILED TIMEFRAME GRAFIEKEN
     # =========================================================
     tab_s, tab_1h, tab_15m, tab_5m = st.tabs(
         [
@@ -220,184 +248,188 @@ if selected_ticker:
 
     # 1. SWING TAB
     with tab_s:
-        st.markdown(
-            f"**Swing Signaal:** <span style='color:{m_daily['color']}; font-weight:bold;'>{verdict_daily}</span> | **Score:** `{score_daily}/4` | **RSI:** `{m_daily['rsi']:.1f}`",
-            unsafe_allow_html=True,
-        )
-        fig_s = go.Figure()
-        fig_s.add_trace(
-            go.Candlestick(
-                x=df_daily.index,
-                open=df_daily["Open"],
-                high=df_daily["High"],
-                low=df_daily["Low"],
-                close=df_daily["Close"],
-                name="Koers",
+        if not df_daily.empty:
+            st.markdown(
+                f"**Swing Signaal:** <span style='color:{m_daily['color']}; font-weight:bold;'>{verdict_daily}</span> | **Score:** `{score_daily}/4` | **RSI:** `{m_daily['rsi']:.1f}`",
+                unsafe_allow_html=True,
             )
-        )
-        fig_s.add_trace(
-            go.Scatter(
-                x=df_daily.index,
-                y=df_daily["EMA_FAST"],
-                line=dict(color="blue", width=1.5),
-                name="EMA 20",
+            fig_s = go.Figure()
+            fig_s.add_trace(
+                go.Candlestick(
+                    x=df_daily.index,
+                    open=df_daily["Open"],
+                    high=df_daily["High"],
+                    low=df_daily["Low"],
+                    close=df_daily["Close"],
+                    name="Koers",
+                )
             )
-        )
-        fig_s.add_trace(
-            go.Scatter(
-                x=df_daily.index,
-                y=df_daily["EMA_SLOW"],
-                line=dict(color="orange", width=1.5),
-                name="EMA 50",
+            fig_s.add_trace(
+                go.Scatter(
+                    x=df_daily.index,
+                    y=df_daily["EMA_FAST"],
+                    line=dict(color="blue", width=1.5),
+                    name="EMA 20",
+                )
             )
-        )
-        fig_s.update_layout(
-            title="Daily Swing Chart",
-            xaxis_rangeslider_visible=False,
-            height=450,
-        )
-        st.plotly_chart(fig_s, use_container_width=True)
+            fig_s.add_trace(
+                go.Scatter(
+                    x=df_daily.index,
+                    y=df_daily["EMA_SLOW"],
+                    line=dict(color="orange", width=1.5),
+                    name="EMA 50",
+                )
+            )
+            fig_s.update_layout(
+                title="Daily Swing Chart",
+                xaxis_rangeslider_visible=False,
+                height=450,
+            )
+            st.plotly_chart(fig_s, use_container_width=True)
 
     # 2. 1 UUR TAB
     with tab_1h:
-        st.markdown(
-            f"**1H Signaal:** <span style='color:{m_1h['color']}; font-weight:bold;'>{verdict_1h}</span> | **Score:** `{score_1h}/4` | **RSI:** `{m_1h['rsi']:.1f}` | **VWAP:** `${m_1h['vwap']:.2f}`",
-            unsafe_allow_html=True,
-        )
-        fig_1h = go.Figure()
-        fig_1h.add_trace(
-            go.Candlestick(
-                x=df_1h.index,
-                open=df_1h["Open"],
-                high=df_1h["High"],
-                low=df_1h["Low"],
-                close=df_1h["Close"],
-                name="Koers",
+        if not df_1h.empty:
+            st.markdown(
+                f"**1H Signaal:** <span style='color:{m_1h['color']}; font-weight:bold;'>{verdict_1h}</span> | **Score:** `{score_1h}/4` | **RSI:** `{m_1h['rsi']:.1f}` | **VWAP:** `${m_1h['vwap']:.2f}`",
+                unsafe_allow_html=True,
             )
-        )
-        fig_1h.add_trace(
-            go.Scatter(
-                x=df_1h.index,
-                y=df_1h["EMA_FAST"],
-                line=dict(color="cyan", width=1.5),
-                name="EMA 5",
+            fig_1h = go.Figure()
+            fig_1h.add_trace(
+                go.Candlestick(
+                    x=df_1h.index,
+                    open=df_1h["Open"],
+                    high=df_1h["High"],
+                    low=df_1h["Low"],
+                    close=df_1h["Close"],
+                    name="Koers",
+                )
             )
-        )
-        fig_1h.add_trace(
-            go.Scatter(
-                x=df_1h.index,
-                y=df_1h["EMA_SLOW"],
-                line=dict(color="purple", width=1.5),
-                name="EMA 15",
+            fig_1h.add_trace(
+                go.Scatter(
+                    x=df_1h.index,
+                    y=df_1h["EMA_FAST"],
+                    line=dict(color="cyan", width=1.5),
+                    name="EMA 5",
+                )
             )
-        )
-        fig_1h.add_trace(
-            go.Scatter(
-                x=df_1h.index,
-                y=df_1h["VWAP"],
-                line=dict(color="magenta", width=2),
-                name="VWAP",
+            fig_1h.add_trace(
+                go.Scatter(
+                    x=df_1h.index,
+                    y=df_1h["EMA_SLOW"],
+                    line=dict(color="purple", width=1.5),
+                    name="EMA 15",
+                )
             )
-        )
-        fig_1h.update_layout(
-            title="1 Uur Trend Chart",
-            xaxis_rangeslider_visible=False,
-            height=450,
-        )
-        st.plotly_chart(fig_1h, use_container_width=True)
+            fig_1h.add_trace(
+                go.Scatter(
+                    x=df_1h.index,
+                    y=df_1h["VWAP"],
+                    line=dict(color="magenta", width=2),
+                    name="VWAP",
+                )
+            )
+            fig_1h.update_layout(
+                title="1 Uur Trend Chart",
+                xaxis_rangeslider_visible=False,
+                height=450,
+            )
+            st.plotly_chart(fig_1h, use_container_width=True)
 
     # 3. 15 MINUTEN TAB
     with tab_15m:
-        st.markdown(
-            f"**15M Signaal:** <span style='color:{m_15m['color']}; font-weight:bold;'>{verdict_15m}</span> | **Score:** `{score_15m}/4` | **RSI:** `{m_15m['rsi']:.1f}` | **VWAP:** `${m_15m['vwap']:.2f}`",
-            unsafe_allow_html=True,
-        )
-        fig_15m = go.Figure()
-        fig_15m.add_trace(
-            go.Candlestick(
-                x=df_15m.index,
-                open=df_15m["Open"],
-                high=df_15m["High"],
-                low=df_15m["Low"],
-                close=df_15m["Close"],
-                name="Koers",
+        if not df_15m.empty:
+            st.markdown(
+                f"**15M Signaal:** <span style='color:{m_15m['color']}; font-weight:bold;'>{verdict_15m}</span> | **Score:** `{score_15m}/4` | **RSI:** `{m_15m['rsi']:.1f}` | **VWAP:** `${m_15m['vwap']:.2f}`",
+                unsafe_allow_html=True,
             )
-        )
-        fig_15m.add_trace(
-            go.Scatter(
-                x=df_15m.index,
-                y=df_15m["EMA_FAST"],
-                line=dict(color="cyan", width=1.5),
-                name="EMA 5",
+            fig_15m = go.Figure()
+            fig_15m.add_trace(
+                go.Candlestick(
+                    x=df_15m.index,
+                    open=df_15m["Open"],
+                    high=df_15m["High"],
+                    low=df_15m["Low"],
+                    close=df_15m["Close"],
+                    name="Koers",
+                )
             )
-        )
-        fig_15m.add_trace(
-            go.Scatter(
-                x=df_15m.index,
-                y=df_15m["EMA_SLOW"],
-                line=dict(color="purple", width=1.5),
-                name="EMA 15",
+            fig_15m.add_trace(
+                go.Scatter(
+                    x=df_15m.index,
+                    y=df_15m["EMA_FAST"],
+                    line=dict(color="cyan", width=1.5),
+                    name="EMA 5",
+                )
             )
-        )
-        fig_15m.add_trace(
-            go.Scatter(
-                x=df_15m.index,
-                y=df_15m["VWAP"],
-                line=dict(color="magenta", width=2),
-                name="VWAP",
+            fig_15m.add_trace(
+                go.Scatter(
+                    x=df_15m.index,
+                    y=df_15m["EMA_SLOW"],
+                    line=dict(color="purple", width=1.5),
+                    name="EMA 15",
+                )
             )
-        )
-        fig_15m.update_layout(
-            title="15 Minuten Setup Chart",
-            xaxis_rangeslider_visible=False,
-            height=450,
-        )
-        st.plotly_chart(fig_15m, use_container_width=True)
+            fig_15m.add_trace(
+                go.Scatter(
+                    x=df_15m.index,
+                    y=df_15m["VWAP"],
+                    line=dict(color="magenta", width=2),
+                    name="VWAP",
+                )
+            )
+            fig_15m.update_layout(
+                title="15 Minuten Setup Chart",
+                xaxis_rangeslider_visible=False,
+                height=450,
+            )
+            st.plotly_chart(fig_15m, use_container_width=True)
 
     # 4. 5 MINUTEN TAB
     with tab_5m:
-        st.markdown(
-            f"**5M Signaal:** <span style='color:{m_5m['color']}; font-weight:bold;'>{verdict_5m}</span> | **Score:** `{score_5m}/4` | **RSI:** `{m_5m['rsi']:.1f}` | **VWAP:** `${m_5m['vwap']:.2f}`",
-            unsafe_allow_html=True,
-        )
-        fig_5m = go.Figure()
-        fig_5m.add_trace(
-            go.Candlestick(
-                x=df_5m.index,
-                open=df_5m["Open"],
-                high=df_5m["High"],
-                low=df_5m["Low"],
-                close=df_5m["Close"],
-                name="Koers",
+        if not df_5m.empty:
+            st.markdown(
+                f"**5M Signaal:** <span style='color:{m_5m['color']}; font-weight:bold;'>{verdict_5m}</span> | **Score:** `{score_5m}/4` | **RSI:** `{m_5m['rsi']:.1f}` | **VWAP:** `${m_5m['vwap']:.2f}`",
+                unsafe_allow_html=True,
             )
-        )
-        fig_5m.add_trace(
-            go.Scatter(
-                x=df_5m.index,
-                y=df_5m["EMA_FAST"],
-                line=dict(color="cyan", width=1.5),
-                name="EMA 5",
+            fig_5m = go.Figure()
+            fig_5m.add_trace(
+                go.Candlestick(
+                    x=df_5m.index,
+                    open=df_5m["Open"],
+                    high=df_5m["High"],
+                    low=df_5m["Low"],
+                    close=df_5m["Close"],
+                    name="Koers",
+                )
             )
-        )
-        fig_5m.add_trace(
-            go.Scatter(
-                x=df_5m.index,
-                y=df_5m["EMA_SLOW"],
-                line=dict(color="purple", width=1.5),
-                name="EMA 15",
+            fig_5m.add_trace(
+                go.Scatter(
+                    x=df_5m.index,
+                    y=df_5m["EMA_FAST"],
+                    line=dict(color="cyan", width=1.5),
+                    name="EMA 5",
+                )
             )
-        )
-        fig_5m.add_trace(
-            go.Scatter(
-                x=df_5m.index,
-                y=df_5m["VWAP"],
-                line=dict(color="magenta", width=2),
-                name="VWAP",
+            fig_5m.add_trace(
+                go.Scatter(
+                    x=df_5m.index,
+                    y=df_5m["EMA_SLOW"],
+                    line=dict(color="purple", width=1.5),
+                    name="EMA 15",
+                )
             )
-        )
-        fig_5m.update_layout(
-            title="5 Minuten Entry Chart",
-            xaxis_rangeslider_visible=False,
-            height=450,
-        )
-        st.plotly_chart(fig_5m, use_container_width=True)
+            fig_5m.add_trace(
+                go.Scatter(
+                    x=df_5m.index,
+                    y=df_5m["VWAP"],
+                    line=dict(color="magenta", width=2),
+                    name="VWAP",
+                )
+            )
+            fig_5m.update_layout(
+                title="5 Minuten Entry Chart",
+                xaxis_rangeslider_visible=False,
+                height=450,
+            )
+            st.plotly_chart(fig_5m, use_container_width=True)
