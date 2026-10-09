@@ -24,6 +24,16 @@ selected_ticker = st.selectbox(
 )
 
 
+# Hulpfunctie voor het bepalen van de kleur op basis van het verdict
+def get_signal_color(verdict):
+    if "BUY" in verdict:
+        return "#00c853"  # Fel Groen
+    elif "SELL" in verdict:
+        return "#ff1744"  # Fel Rood
+    else:
+        return "#29b6f6"  # Blauw (HOLD / NEUTRAAL)
+
+
 # Hulpfunctie voor het berekenen van indicatoren en scores per timeframe
 def analyze_timeframe(df, tf_type="intraday"):
     if df.empty:
@@ -103,7 +113,7 @@ def analyze_timeframe(df, tf_type="intraday"):
     elif score <= -1:
         verdict = "SELL"
     else:
-        verdict = "NEUTRAAL"
+        verdict = "HOLD / NEUTRAAL"
 
     metrics = {
         "score": score,
@@ -113,6 +123,7 @@ def analyze_timeframe(df, tf_type="intraday"):
         "ema_fast": latest["EMA_FAST"],
         "ema_slow": latest["EMA_SLOW"],
         "vwap": latest.get("VWAP", None),
+        "color": get_signal_color(verdict),
     }
 
     return df, score, verdict, metrics
@@ -147,26 +158,34 @@ if selected_ticker:
 
     t_col1, t_col2, t_col3, t_col4 = st.columns(4)
 
-    t_col1.metric(
-        label="🌊 Swing (Daily)",
-        value=verdict_daily,
-        delta=f"Score: {score_daily} / 4",
-    )
-    t_col2.metric(
-        label="⏱️ 1 Uur (Trend)",
-        value=verdict_1h,
-        delta=f"Score: {score_1h} / 4",
-    )
-    t_col3.metric(
-        label="⚡ 15 Minuten (Setup)",
-        value=verdict_15m,
-        delta=f"Score: {score_15m} / 4",
-    )
-    t_col4.metric(
-        label="🎯 5 Minuten (Entry)",
-        value=verdict_5m,
-        delta=f"Score: {score_5m} / 4",
-    )
+
+    def render_custom_card(title, verdict, score, color):
+        st.markdown(
+            f"""
+            <div style="border: 2px solid {color}; border-radius: 10px; padding: 15px; text-align: center; background-color: rgba(0,0,0,0.02);">
+                <h4 style="margin: 0; color: #555;">{title}</h4>
+                <h2 style="margin: 5px 0; color: {color}; font-weight: bold;">{verdict}</h2>
+                <p style="margin: 0; font-size: 14px; color: #777;">Score: <b>{score} / 4</b></p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+    with t_col1:
+        render_custom_card(
+            "🌊 Swing (Daily)", verdict_daily, score_daily, m_daily["color"]
+        )
+    with t_col2:
+        render_custom_card("⏱️ 1 Uur (Trend)", verdict_1h, score_1h, m_1h["color"])
+    with t_col3:
+        render_custom_card(
+            "⚡ 15 Minuten (Setup)", verdict_15m, score_15m, m_15m["color"]
+        )
+    with t_col4:
+        render_custom_card("🎯 5 Minuten (Entry)", verdict_5m, score_5m, m_5m["color"])
+
+    st.write("")
 
     # Totale Confluentie Check
     total_score = score_daily + score_1h + score_15m + score_5m
@@ -174,15 +193,15 @@ if selected_ticker:
 
     if total_score >= 10:
         st.success(
-            "🔥 **Sterke Bullish Confluentie:** Alle timeframes wijzen in dezelfde opwaartse richting!"
+            "🟢 **Sterke Bullish Confluentie:** Alle timeframes wijzen in dezelfde opwaartse richting!"
         )
     elif total_score <= -10:
         st.error(
-            "⚠️ **Sterke Bearish Confluentie:** Alle timeframes wijzen in dezelfde neerwaartse richting!"
+            "🔴 **Sterke Bearish Confluentie:** Alle timeframes wijzen in dezelfde neerwaartse richting!"
         )
     else:
         st.info(
-            "ℹ️ **Gemengde Trend:** De timeframes spreken elkaar deels tegen. Wees voorzichtig met instappen."
+            "🔵 **Gemengde Trend / Neutraal:** De timeframes spreken elkaar deels tegen. Wees voorzichtig met instappen."
         )
 
     st.divider()
@@ -201,8 +220,9 @@ if selected_ticker:
 
     # 1. SWING TAB
     with tab_s:
-        st.write(
-            f"**Swing Score:** `{score_daily}/4` | **RSI:** `{m_daily['rsi']:.1f}`"
+        st.markdown(
+            f"**Swing Signaal:** <span style='color:{m_daily['color']}; font-weight:bold;'>{verdict_daily}</span> | **Score:** `{score_daily}/4` | **RSI:** `{m_daily['rsi']:.1f}`",
+            unsafe_allow_html=True,
         )
         fig_s = go.Figure()
         fig_s.add_trace(
@@ -240,8 +260,9 @@ if selected_ticker:
 
     # 2. 1 UUR TAB
     with tab_1h:
-        st.write(
-            f"**1H Score:** `{score_1h}/4` | **RSI:** `{m_1h['rsi']:.1f}` | **VWAP:** `${m_1h['vwap']:.2f}`"
+        st.markdown(
+            f"**1H Signaal:** <span style='color:{m_1h['color']}; font-weight:bold;'>{verdict_1h}</span> | **Score:** `{score_1h}/4` | **RSI:** `{m_1h['rsi']:.1f}` | **VWAP:** `${m_1h['vwap']:.2f}`",
+            unsafe_allow_html=True,
         )
         fig_1h = go.Figure()
         fig_1h.add_trace(
@@ -287,8 +308,9 @@ if selected_ticker:
 
     # 3. 15 MINUTEN TAB
     with tab_15m:
-        st.write(
-            f"**15M Score:** `{score_15m}/4` | **RSI:** `{m_15m['rsi']:.1f}` | **VWAP:** `${m_15m['vwap']:.2f}`"
+        st.markdown(
+            f"**15M Signaal:** <span style='color:{m_15m['color']}; font-weight:bold;'>{verdict_15m}</span> | **Score:** `{score_15m}/4` | **RSI:** `{m_15m['rsi']:.1f}` | **VWAP:** `${m_15m['vwap']:.2f}`",
+            unsafe_allow_html=True,
         )
         fig_15m = go.Figure()
         fig_15m.add_trace(
@@ -334,8 +356,9 @@ if selected_ticker:
 
     # 4. 5 MINUTEN TAB
     with tab_5m:
-        st.write(
-            f"**5M Score:** `{score_5m}/4` | **RSI:** `{m_5m['rsi']:.1f}` | **VWAP:** `${m_5m['vwap']:.2f}`"
+        st.markdown(
+            f"**5M Signaal:** <span style='color:{m_5m['color']}; font-weight:bold;'>{verdict_5m}</span> | **Score:** `{score_5m}/4` | **RSI:** `{m_5m['rsi']:.1f}` | **VWAP:** `${m_5m['vwap']:.2f}`",
+            unsafe_allow_html=True,
         )
         fig_5m = go.Figure()
         fig_5m.add_trace(
